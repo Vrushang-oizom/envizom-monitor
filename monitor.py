@@ -20,6 +20,11 @@ Configuration (environment variables or a .env file next to this script):
                         (one quick re-check avoids false alarms from a network blip;
                         set 0 to alert on the very first failure)
     EXPECT_SELECTOR     optional CSS selector that must be visible, e.g. "input[type=password]"
+    ENVIZOM_EMAIL       if set (with ENVIZOM_PASSWORD), the monitor also logs in and counts
+    ENVIZOM_PASSWORD    the site as DOWN if login does not succeed. Use a dedicated test account.
+    LOGIN_TIMEOUT       seconds to wait for login to complete, default 30
+    LOGIN_USER_SELECTOR / LOGIN_PASS_SELECTOR / LOGIN_SUBMIT_SELECTOR / LOGIN_SUCCESS_SELECTOR
+                        optional CSS selectors if auto-detection of the login form fails
     REMIND_EVERY        while still down, re-alert every N seconds, default 1800 (0 = never)
 """
 
@@ -118,6 +123,12 @@ def check_site(url, timeout_s, expect_selector=None):
                     details["js_error"] = js_errors[0][:200]
                 return _fail(page, "Page loaded blank (app did not render)", details)
 
+            # ---- login check (only if credentials are configured)
+            if os.environ.get("ENVIZOM_EMAIL") and os.environ.get("ENVIZOM_PASSWORD"):
+                ok, reason = do_login(page, details)
+                if not ok:
+                    return _fail(page, reason, details)
+
             details["title"] = page.title()
             return True, "OK", details, None
 
@@ -128,6 +139,101 @@ def check_site(url, timeout_s, expect_selector=None):
             return _fail(page, f"Could not open site: {msg[:200]}", details)
         finally:
             browser.close()
+
+
+# Fallback selectors, tried in order. Override with LOGIN_*_SELECTOR env vars if needed.
+USER_SELECTORS = [
+    "input[type=email]", "input[formcontrolname*=email i]", "input[name*=email i]",
+    "input[id*=email i]", "input[placeholder*=email i]", "input[formcontrolname*=user i]",
+    "input[name*=user i]", "input[id*=user i]", "input[placeholder*=user i]",
+    "input[type=text]",
+]
+SUBMIT_SELECTORS = [
+    "button[type=submit]", "input[type=submit]",
+    "button:has-text('Log in')", "button:has-text('Login')", "button:has-text('Sign in')",
+    "button:has-text('Sign In')", "button:has-text('Continue')",
+]
+LOGIN_ERROR_WORDS = [
+    "invalid", "incorrect", "wrong password", "not found", "failed", "unauthorized",
+    "try again", "locked", "doesn't exist", "does not exist",
+]
+
+
+def _first_visible(page, selectors):
+    for sel in selectors:
+        loc = page.locator(sel)
+        for i in range(min(loc.count(), 5)):
+            el = loc.nth(i)
+            try:
+                if el.is_visible():
+                    return el
+            except Exception:
+                pass
+    return None
+
+
+def do_login(page, details):
+    """Fill in the login form and confirm we get past it. Returns (ok, reason)."""
+    email = os.environ["ENVIZOM_EMAIL"]
+    password = os.environ["ENVIZOM_PASSWORD"]
+    login_timeout = int(os.environ.get("LOGIN_TIMEOUT", "30"))
+    t0 = time.time()
+
+    pw_sel = os.environ.get("LOGIN_PASS_SELECTOR") or "input[type=password]"
+    try:
+        page.wait_for_selector(pw_sel, state="visible", timeout=20000)
+    except PWTimeout:
+        return False, "Login page did not show a password field"
+    pw = page.locator(pw_sel).first
+
+    user_sel = os.environ.get("LOGIN_USER_SELECTOR")
+    user = page.locator(user_sel).first if user_sel else _first_visible(page, USER_SELECTORS)
+    if user is None:
+        return False, "Login page: email/username field not found"
+
+    login_url = page.url
+    user.fill(email)
+    pw.fill(password)
+
+    submit_sel = os.environ.get("LOGIN_SUBMIT_SELECTOR")
+    btn = page.locator(submit_sel).first if submit_sel else _first_visible(page, SUBMIT_SELECTORS)
+    if btn is not None:
+        btn.click()
+    else:
+        pw.press("Enter")
+
+    success_sel = os.environ.get("LOGIN_SUCCESS_SELECTOR")
+    deadline = time.time() + login_timeout
+    while time.time() < deadline:
+        page.wait_for_timeout(1000)
+        try:
+            if success_sel:
+                if page.locator(success_sel).first.is_visible():
+                    break
+            else:
+                pw_gone = page.locator(pw_sel).count() == 0 or not page.locator(pw_sel).first.is_visible()
+                if pw_gone and page.url != login_url:
+                    break
+            # an error message appeared on the login page?
+            if page.locator(pw_sel).count() and page.locator(pw_sel).first.is_visible():
+                txt = page.inner_text("body").lower()
+                hit = next((w for w in LOGIN_ERROR_WORDS if w in txt), None)
+                if hit and time.time() - t0 > 2:
+                    snippet = next((l.strip() for l in page.inner_text("body").splitlines()
+                                    if hit in l.lower()), hit)
+                    return False, f'Login failed - page says: "{snippet[:120]}"'
+        except Exception:
+            pass  # page navigating; keep waiting
+    else:
+        return False, f"Login did not complete within {login_timeout}s (still on login page)"
+
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except PWTimeout:
+        pass
+    details["login_time_s"] = round(time.time() - t0, 1)
+    details["after_login_url"] = page.url
+    return True, "OK"
 
 
 def _fail(page, reason, details):
@@ -206,7 +312,8 @@ def run_check(conf, state):
         attempts = 2
 
     if ok:
-        log(f"UP   - {url} - {details.get('load_time_s')}s, HTTP {details.get('http_status')}")
+        login = f", login OK in {details['login_time_s']}s" if "login_time_s" in details else ""
+        log(f"UP   - {url} - {details.get('load_time_s')}s, HTTP {details.get('http_status')}{login}")
         if state["status"] == "down":
             send_gchat(conf["webhook"], up_message(url, state.get("down_since"), details))
         state.update(status="up", down_since=None, last_alert=0)
