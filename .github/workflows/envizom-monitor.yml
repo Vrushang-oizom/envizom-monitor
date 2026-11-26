@@ -49,6 +49,7 @@ jobs:
           PAGE_TIMEOUT: "45"
           RETRY_DELAY: "15"
           REMIND_EVERY: "1800"
+          TZ: Asia/Kolkata
         run: python monitor.py --once
 
       - name: Save status
