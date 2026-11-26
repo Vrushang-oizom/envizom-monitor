@@ -21,7 +21,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
 
@@ -43,6 +43,8 @@ jobs:
       - name: Check Envizom
         env:
           GCHAT_WEBHOOK_URL: ${{ secrets.GCHAT_WEBHOOK_URL }}
+          ENVIZOM_EMAIL: ${{ secrets.ENVIZOM_EMAIL }}
+          ENVIZOM_PASSWORD: ${{ secrets.ENVIZOM_PASSWORD }}
           ENVIZOM_URL: ${{ inputs.simulate_down && 'https://envizom-down-test.oizom.com/' || 'https://envizom.oizom.com/' }}
           BROWSER_CHANNEL: chrome
           PAGE_TIMEOUT: "45"
