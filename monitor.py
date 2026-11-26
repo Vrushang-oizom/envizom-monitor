@@ -27,6 +27,9 @@ Configuration (environment variables or a .env file next to this script):
     LOGIN_CHECKBOX_SELECTOR (the login ticks the "I accept the Terms and Conditions" box automatically)
                         optional CSS selectors if auto-detection of the login form fails
     REMIND_EVERY        while still down, re-alert every N seconds, default 1800 (0 = never)
+    GCHAT_STATUS_WEBHOOK_URL  optional second Google Chat webhook that gets a daily
+                        "Still running fine" message
+    HEARTBEAT_TIME      local time (HH:MM, 24h) to send the daily message, default 09:00
 """
 
 import argparse
@@ -375,18 +378,11 @@ def send_gchat(webhook, text):
 
 
 def down_message(url, reason, details, attempts):
-    lines = [
-        "🔴 *ENVIZOM IS DOWN*",
-        f"*URL:* {url}",
+    return "\n".join([
+        "*Envizom not Working*",
         f"*Problem:* {reason}",
-        f"*Detected:* {now()} (failed {attempts} check{'s' if attempts > 1 else ''} in a row)",
-    ]
-    if "http_status" in details:
-        lines.append(f"*HTTP status:* {details['http_status']}")
-    if "js_error" in details:
-        lines.append(f"*JS error:* `{details['js_error']}`")
-    lines.append(f"*Checked from:* {socket.gethostname()}")
-    return "\n".join(lines)
+        f"*Detected:* {now()}",
+    ])
 
 
 def up_message(url, down_since, details):
@@ -413,6 +409,28 @@ def save_state(s):
 
 
 # ---------------------------------------------------------------- main logic
+def maybe_send_heartbeat(conf, state, ok, details):
+    """Once a day (at/after HEARTBEAT_TIME) send a 'Still running fine' message to the status chat."""
+    hook = conf.get("status_webhook")
+    if not hook:
+        return
+    today = datetime.now().strftime("%Y-%m-%d")
+    if state.get("last_heartbeat") == today:
+        return
+    if datetime.now().strftime("%H:%M") < conf["heartbeat_time"]:
+        return
+    if ok:
+        login = " Login working." if "login_time_s" in details else ""
+        msg = (f"*Still running fine* ✅\n"
+               f"Envizom is working.{login}\n"
+               f"*Checked:* {now()}")
+    else:
+        msg = (f"*Monitor running* - but Envizom is currently *not working* ⚠️\n"
+               f"*Checked:* {now()}")
+    if send_gchat(hook, msg):
+        state["last_heartbeat"] = today
+
+
 def run_check(conf, state):
     url = conf["url"]
     ok, reason, details, shot = check_site(url, conf["timeout"], conf["selector"])
@@ -438,12 +456,13 @@ def run_check(conf, state):
         if first_failure or remind_due:
             msg = down_message(url, reason, details, attempts)
             if not first_failure:
-                msg = msg.replace("ENVIZOM IS DOWN", "ENVIZOM STILL DOWN")
+                msg = msg.replace("Envizom not Working", "Envizom still not Working")
             if send_gchat(conf["webhook"], msg):
                 state["last_alert"] = time.time()
         if first_failure:
             state["down_since"] = time.time()
         state["status"] = "down"
+    maybe_send_heartbeat(conf, state, ok, details)
     save_state(state)
     return ok
 
@@ -463,12 +482,16 @@ def main():
         "retry_delay": cfg("RETRY_DELAY", "15", int),
         "selector": cfg("EXPECT_SELECTOR") or None,
         "remind": cfg("REMIND_EVERY", "1800", int),
+        "status_webhook": cfg("GCHAT_STATUS_WEBHOOK_URL") or None,
+        "heartbeat_time": cfg("HEARTBEAT_TIME", "09:00"),
     }
     if not conf["webhook"]:
         sys.exit("GCHAT_WEBHOOK_URL is not set. Put it in a .env file or environment variable.")
 
     if args.test_alert:
-        ok = send_gchat(conf["webhook"], f"✅ Envizom monitor test message from {socket.gethostname()} at {now()}")
+        ok = send_gchat(conf["webhook"], f"✅ Envizom monitor test message (alerts chat) at {now()}")
+        if conf["status_webhook"]:
+            ok = send_gchat(conf["status_webhook"], f"✅ Envizom monitor test message (status chat) at {now()}") and ok
         sys.exit(0 if ok else 1)
 
     state = load_state()
