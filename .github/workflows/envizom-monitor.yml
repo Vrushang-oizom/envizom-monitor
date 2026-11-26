@@ -1,0 +1,70 @@
+name: Envizom Monitor
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      simulate_down:
+        description: "Simulate Envizom being down (tests the alert)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: envizom-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Restore last status
+        uses: actions/cache/restore@v4
+        with:
+          path: .monitor_state.json
+          key: monitor-state-${{ github.run_id }}
+          restore-keys: monitor-state-
+
+      - name: Check Envizom
+        env:
+          GCHAT_WEBHOOK_URL: ${{ secrets.GCHAT_WEBHOOK_URL }}
+          ENVIZOM_URL: ${{ inputs.simulate_down && 'https://envizom-down-test.oizom.com/' || 'https://envizom.oizom.com/' }}
+          BROWSER_CHANNEL: chrome
+          PAGE_TIMEOUT: "45"
+          RETRY_DELAY: "15"
+          REMIND_EVERY: "1800"
+        run: python monitor.py --once
+
+      - name: Save status
+        if: always() && hashFiles('.monitor_state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .monitor_state.json
+          key: monitor-state-${{ github.run_id }}
+
+      - name: Upload screenshot of failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: envizom-down-screenshot-${{ github.run_id }}
+          path: screenshots/
+          retention-days: 7
+
+      - name: Keep schedule alive
+        if: always() && github.event_name == 'schedule'
+        uses: gautamkrishnar/keepalive-workflow@v2
