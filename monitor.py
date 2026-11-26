@@ -23,7 +23,8 @@ Configuration (environment variables or a .env file next to this script):
     ENVIZOM_EMAIL       if set (with ENVIZOM_PASSWORD), the monitor also logs in and counts
     ENVIZOM_PASSWORD    the site as DOWN if login does not succeed. Use a dedicated test account.
     LOGIN_TIMEOUT       seconds to wait for login to complete, default 30
-    LOGIN_USER_SELECTOR / LOGIN_PASS_SELECTOR / LOGIN_SUBMIT_SELECTOR / LOGIN_SUCCESS_SELECTOR
+    LOGIN_USER_SELECTOR / LOGIN_PASS_SELECTOR / LOGIN_SUBMIT_SELECTOR / LOGIN_SUCCESS_SELECTOR /
+    LOGIN_CHECKBOX_SELECTOR (the login ticks the "I accept the Terms and Conditions" box automatically)
                         optional CSS selectors if auto-detection of the login form fails
     REMIND_EVERY        while still down, re-alert every N seconds, default 1800 (0 = never)
 """
@@ -87,6 +88,7 @@ def check_site(url, timeout_s, expect_selector=None):
         page = browser.new_page(ignore_https_errors=False)
         js_errors = []
         page.on("pageerror", lambda e: js_errors.append(str(e)))
+        stage = {"now": "loading the page"}
         try:
             t0 = time.time()
             resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout_s * 1000)
@@ -125,6 +127,7 @@ def check_site(url, timeout_s, expect_selector=None):
 
             # ---- login check (only if credentials are configured)
             if os.environ.get("ENVIZOM_EMAIL") and os.environ.get("ENVIZOM_PASSWORD"):
+                stage["now"] = "logging in"
                 ok, reason = do_login(page, details)
                 if not ok:
                     return _fail(page, reason, details)
@@ -132,8 +135,11 @@ def check_site(url, timeout_s, expect_selector=None):
             details["title"] = page.title()
             return True, "OK", details, None
 
-        except PWTimeout:
-            return _fail(page, f"Page did not load within {timeout_s}s (timeout)", details)
+        except PWTimeout as e:
+            if stage["now"] == "loading the page":
+                return _fail(page, f"Page did not load within {timeout_s}s (timeout)", details)
+            details["login_debug"] = describe_form(page)
+            return _fail(page, f"Timed out while {stage['now']}: {str(e).splitlines()[0][:150]}", details)
         except Exception as e:  # DNS failure, connection refused, SSL error, ...
             msg = str(e).split("\n")[0]
             return _fail(page, f"Could not open site: {msg[:200]}", details)
@@ -157,6 +163,75 @@ LOGIN_ERROR_WORDS = [
     "invalid", "incorrect", "wrong password", "not found", "failed", "unauthorized",
     "try again", "locked", "doesn't exist", "does not exist",
 ]
+
+
+def _type_into(el, value):
+    """Type a value into a field, trying progressively stronger methods. Returns error text or None."""
+    last = None
+    for attempt in ("fill", "force", "js"):
+        try:
+            if attempt == "fill":
+                el.fill(value, timeout=8000)
+            elif attempt == "force":
+                el.fill(value, timeout=8000, force=True)
+            else:
+                el.evaluate("""(e, v) => { e.focus(); e.value = v;
+                    e.dispatchEvent(new Event('input', {bubbles: true}));
+                    e.dispatchEvent(new Event('change', {bubbles: true}));
+                    e.dispatchEvent(new Event('blur', {bubbles: true})); }""", value)
+            return None
+        except Exception as e:
+            last = str(e).splitlines()[0][:100]
+    return last
+
+
+def _tick_checkboxes(page):
+    """Tick every unticked checkbox on the login form (e.g. Terms and Conditions).
+    Handles Angular Material checkboxes whose real <input> is visually hidden. Returns error or None."""
+    sel = os.environ.get("LOGIN_CHECKBOX_SELECTOR") or "input[type=checkbox]"
+    boxes = page.locator(sel)
+    for i in range(min(boxes.count(), 5)):
+        box = boxes.nth(i)
+        try:
+            if box.is_checked():
+                continue
+        except Exception:
+            continue
+        done = False
+        for how in ("check", "force", "label", "js"):
+            try:
+                if how == "check":
+                    box.check(timeout=5000)
+                elif how == "force":
+                    box.check(timeout=5000, force=True)
+                elif how == "label":
+                    page.get_by_text("I accept", exact=False).first.click(timeout=5000)
+                else:
+                    box.evaluate("e => e.click()")
+                page.wait_for_timeout(300)
+                if box.is_checked():
+                    done = True
+                    break
+            except Exception:
+                pass
+        if not done:
+            return f"checkbox #{i + 1} would not tick"
+    return None
+
+
+def describe_form(page):
+    """Summary of inputs/buttons on the page (never their values) to help fix selectors."""
+    try:
+        return page.evaluate("""() => {
+          const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+          const ins = [...document.querySelectorAll('input')].slice(0, 10).map(i =>
+            `input type=${i.type} name=${i.name||'-'} id=${i.id||'-'} formcontrolname=${i.getAttribute('formcontrolname')||'-'} placeholder="${(i.placeholder||'').slice(0,30)}" checked=${i.checked} visible=${vis(i)}`);
+          const bts = [...document.querySelectorAll('button, [type=submit], [role=button]')].slice(0, 10).map(b =>
+            `button "${(b.innerText||b.value||'').trim().slice(0,30)}" type=${b.type||'-'} disabled=${!!b.disabled} visible=${vis(b)}`);
+          return `URL: ${location.href}\\n` + ins.concat(bts).join('\\n');
+        }""")
+    except Exception as e:
+        return f"(could not read form: {e})"
 
 
 def _first_visible(page, selectors):
@@ -183,24 +258,60 @@ def do_login(page, details):
     try:
         page.wait_for_selector(pw_sel, state="visible", timeout=20000)
     except PWTimeout:
+        details["login_debug"] = describe_form(page)
         return False, "Login page did not show a password field"
     pw = page.locator(pw_sel).first
 
     user_sel = os.environ.get("LOGIN_USER_SELECTOR")
     user = page.locator(user_sel).first if user_sel else _first_visible(page, USER_SELECTORS)
     if user is None:
+        details["login_debug"] = describe_form(page)
         return False, "Login page: email/username field not found"
 
     login_url = page.url
-    user.fill(email)
-    pw.fill(password)
+    err = _type_into(user, email)
+    if err:
+        details["login_debug"] = describe_form(page)
+        return False, f"Login: could not type into the email field ({err})"
+    err = _type_into(pw, password)
+    if err:
+        details["login_debug"] = describe_form(page)
+        return False, f"Login: could not type into the password field ({err})"
+
+    # tick "I accept the Terms and Conditions" (or any other required, unticked checkbox)
+    err = _tick_checkboxes(page)
+    if err:
+        details["login_debug"] = describe_form(page)
+        return False, f"Login: could not tick the Terms checkbox ({err})"
 
     submit_sel = os.environ.get("LOGIN_SUBMIT_SELECTOR")
     btn = page.locator(submit_sel).first if submit_sel else _first_visible(page, SUBMIT_SELECTORS)
     if btn is not None:
-        btn.click()
-    else:
-        pw.press("Enter")
+        # wait (up to 10 s) for the button to become enabled after the form is valid
+        for _ in range(20):
+            try:
+                if btn.is_enabled():
+                    break
+            except Exception:
+                break
+            page.wait_for_timeout(500)
+        else:
+            details["login_debug"] = describe_form(page)
+            return False, "Login: LOG IN button stayed disabled after filling the form"
+    clicked = False
+    if btn is not None:
+        for kw in ({}, {"force": True}):
+            try:
+                btn.click(timeout=8000, **kw)
+                clicked = True
+                break
+            except Exception:
+                pass  # e.g. button covered/disabled -> try next, then Enter
+    if not clicked:
+        try:
+            pw.press("Enter", timeout=5000)
+        except Exception:
+            pass
 
     success_sel = os.environ.get("LOGIN_SUCCESS_SELECTOR")
     deadline = time.time() + login_timeout
@@ -225,6 +336,7 @@ def do_login(page, details):
         except Exception:
             pass  # page navigating; keep waiting
     else:
+        details["login_debug"] = describe_form(page)
         return False, f"Login did not complete within {login_timeout}s (still on login page)"
 
     try:
@@ -319,6 +431,8 @@ def run_check(conf, state):
         state.update(status="up", down_since=None, last_alert=0)
     else:
         log(f"DOWN - {url} - {reason}" + (f" (screenshot: {shot})" if shot else ""))
+        if details.get("login_debug"):
+            log("Login page elements found:\n" + details["login_debug"])
         first_failure = state["status"] != "down"
         remind_due = conf["remind"] > 0 and time.time() - state.get("last_alert", 0) >= conf["remind"]
         if first_failure or remind_due:
