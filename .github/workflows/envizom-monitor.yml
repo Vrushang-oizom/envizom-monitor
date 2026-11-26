@@ -12,7 +12,6 @@ on:
 
 permissions:
   contents: read
-  actions: write
 
 concurrency:
   group: envizom-monitor
@@ -66,7 +65,3 @@ jobs:
           name: envizom-down-screenshot-${{ github.run_id }}
           path: screenshots/
           retention-days: 7
-
-      - name: Keep schedule alive
-        if: always() && github.event_name == 'schedule'
-        uses: gautamkrishnar/keepalive-workflow@v2
