@@ -52,7 +52,7 @@ jobs:
           RETRY_DELAY: "15"
           REMIND_EVERY: "1800"
           TZ: Asia/Kolkata
-          HEARTBEAT_TIME: "09:00"
+          HEARTBEAT_TIME: "10:30"
         run: python monitor.py --once
 
       - name: Save status
