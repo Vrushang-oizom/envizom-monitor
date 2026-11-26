@@ -2,8 +2,8 @@ name: Envizom Monitor
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
-  workflow_dispatch:
+    - cron: "*/10 * * * *"        # every 5 minutes (GitHub's minimum; runs can be delayed a few minutes)
+  workflow_dispatch:              # "Run workflow" button for manual testing
     inputs:
       simulate_down:
         description: "Simulate Envizom being down (tests the alert)"
@@ -32,6 +32,7 @@ jobs:
       - name: Install
         run: pip install -r requirements.txt
 
+      # Remember up/down status between runs, so we alert once per outage (not every 5 min)
       - name: Restore last status
         uses: actions/cache/restore@v4
         with:
@@ -42,14 +43,16 @@ jobs:
       - name: Check Envizom
         env:
           GCHAT_WEBHOOK_URL: ${{ secrets.GCHAT_WEBHOOK_URL }}
+          GCHAT_STATUS_WEBHOOK_URL: ${{ secrets.GCHAT_STATUS_WEBHOOK_URL }}
           ENVIZOM_EMAIL: ${{ secrets.ENVIZOM_EMAIL }}
           ENVIZOM_PASSWORD: ${{ secrets.ENVIZOM_PASSWORD }}
           ENVIZOM_URL: ${{ inputs.simulate_down && 'https://envizom-down-test.oizom.com/' || 'https://envizom.oizom.com/' }}
-          BROWSER_CHANNEL: chrome
+          BROWSER_CHANNEL: chrome     # use Chrome that is preinstalled on GitHub's runner
           PAGE_TIMEOUT: "45"
           RETRY_DELAY: "15"
           REMIND_EVERY: "1800"
           TZ: Asia/Kolkata
+          HEARTBEAT_TIME: "09:00"
         run: python monitor.py --once
 
       - name: Save status
