@@ -386,14 +386,16 @@ def down_message(url, reason, details, attempts):
 
 
 def up_message(url, down_since, details):
-    dur = ""
     if down_since:
         mins = int((time.time() - down_since) // 60)
-        dur = f" after ~{mins} min" if mins else " (under a minute)"
-    return (
-        f"🟢 *ENVIZOM IS BACK UP*{dur}\n*URL:* {url}\n*Recovered:* {now()}"
-        + (f"\n*Load time:* {details['load_time_s']}s" if "load_time_s" in details else "")
-    )
+        after = f"After {mins} Minute{'s' if mins != 1 else ''}" if mins >= 1 else "After less than 1 Minute"
+    else:
+        after = ""
+    title = f"*Envizom is Working {after}*" if after else "*Envizom is Working*"
+    lines = [title, f"*Recovered:* {now()}"]
+    if "load_time_s" in details:
+        lines.append(f"*Load Time:* {details['load_time_s']}s")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------- state
@@ -483,7 +485,7 @@ def main():
         "selector": cfg("EXPECT_SELECTOR") or None,
         "remind": cfg("REMIND_EVERY", "1800", int),
         "status_webhook": cfg("GCHAT_STATUS_WEBHOOK_URL") or None,
-        "heartbeat_time": cfg("HEARTBEAT_TIME", "09:00"),
+        "heartbeat_time": cfg("HEARTBEAT_TIME", "10:30"),
     }
     if not conf["webhook"]:
         sys.exit("GCHAT_WEBHOOK_URL is not set. Put it in a .env file or environment variable.")
